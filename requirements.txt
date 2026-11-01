@@ -1,4 +1,5 @@
 aiogram
+flask
 apscheduler
 google-genai
 tzdata
