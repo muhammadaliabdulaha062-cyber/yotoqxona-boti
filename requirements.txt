@@ -1,0 +1,4 @@
+aiogram
+apscheduler
+google-genai
+tzdata
