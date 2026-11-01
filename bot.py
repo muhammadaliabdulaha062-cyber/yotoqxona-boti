@@ -4,6 +4,8 @@ import os
 import random
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from flask import Flask
+import threading
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -52,6 +54,17 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Render port talabini qondirish uchun veb-server
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Yotoqxona Boti 24/7 ishlamoqda!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
 
 def load_data():
     if not os.path.exists(DATA_FILE):
@@ -60,13 +73,16 @@ def load_data():
             "users": {},
             "order": [],
             "last_daily": {},
-            "last_weekly": {"bath": None, "sweep": None},
+            "last_weekly_index": 0,  # Haftalik qat'iy navbat uchun indeks
             "penalties": [],
             "today_tasks": {},
             "pending_videos": {}
         }
     with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+        if "last_weekly_index" not in data:
+            data["last_weekly_index"] = 0
+        return data
 
 
 def save_data(data):
@@ -86,22 +102,34 @@ async def cmd_start(message: Message):
             [InlineKeyboardButton(text="🙋‍♂️ Yotoqxona ro'yxatiga qo'shilish", callback_data="join_room")]
         ])
         await message.answer(
-            "🏠 **Yotoqxona Nazorat Boti ishga tushdi!**\n\n"
+            "🏠 **Yotoqxona Nazorat Boti guruhga ulandi!**\n\n"
             "3 nafar xonadosh pastdagi tugmani bosib ro'yxatdan o'tsin.\n"
-            "❗️ *Muhim: Tugmani bosgach, @yotoqxona_nazorat_2026_bot lichkasiga kirib ham /start bosib qo'ying (shaxsiy xabarlar borishi uchun).*",
+            "❗️ *Muhim: Tugmani bosgach, bot lichkasiga kirib ham /start bosib qo'ying (shaxsiy xabarlar borishi uchun).*",
             reply_markup=kb,
             parse_mode="Markdown"
         )
     else:
+        bot_username = (await bot.get_me()).username
+        group_add_url = f"https://t.me/{bot_username}?startgroup=true"
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Botni guruhga qo'shish", url=group_add_url)]
+        ])
+
         uid = str(message.from_user.id)
         if uid in data["users"]:
             await message.answer(
                 f"Salom, {data['users'][uid]['name']}! Siz ro'yxatdasiz.\n"
-                f"Bugungi vazifalaringizni ko'rish uchun /vazifa buyrug'ini bosing."
+                f"Botni yotoqxona guruhiga ulash yoki boshqarish uchun quyidagi tugmani bosing:",
+                reply_markup=kb,
+                parse_mode="Markdown"
             )
         else:
             await message.answer(
-                "Salom! Avval yotoqxona guruhiga botni qo'shib, guruhdagi tugma orqali ro'yxatdan o'ting! So'ngra bu yerga qaytib /start bosing."
+                "Salom! Yotoqxona nazorat botiga xush kelibsiz.\n"
+                "Ishni boshlash uchun avval botni yotoqxona guruhingizga qo'shing:",
+                reply_markup=kb,
+                parse_mode="Markdown"
             )
 
 
@@ -137,6 +165,7 @@ async def join_room_cb(call: CallbackQuery):
         await call.message.edit_text(
             f"🎉 **3 nafar xonadosh to'liq yig'ildi:** {names}!\n\n"
             f"⏰ Ishlar Dushanbadan Jumagacha har kuni ertalab **06:30 da** avtomatik taqsimlanadi.\n"
+            f"🛁 Haftalik ishlar har hafta **Payshanba soat 23:00 gacha** topshiriladi.\n"
             f"*(Hoziroq sinab ko'rish uchun guruhda /taqsimla buyrug'ini bosing)*",
             parse_mode="Markdown"
         )
@@ -257,27 +286,24 @@ async def assign_daily_and_weekly_tasks(force_test=False):
     data["penalties"] = []
 
     weekly_text = ""
-    if weekday == 3:
-        last_bath = data["last_weekly"].get("bath")
-        last_sweep = data["last_weekly"].get("sweep")
+    # HAFTALIK ISH (Payshanba kuni taqsimlanadi va navbatma-navbat aylanadi)
+    if weekday == 3 or force_test:
+        weekly_index = data.get("last_weekly_index", 0)
+        bath_u = users[weekly_index % len(users)]
+        
+        # Keyingi safar boshqa xonadoshga tushishi uchun indeksni suramiz
+        data["last_weekly_index"] = (weekly_index + 1) % len(users)
 
-        bath_candidates = [u for u in users if u != last_bath]
-        bath_u = random.choice(bath_candidates)
-
-        sweep_candidates = [u for u in users if u != bath_u and u != last_sweep]
-        if not sweep_candidates:
-            sweep_candidates = [u for u in users if u != bath_u]
+        # Qolgan ikkita xonadoshdan biri uy supurishga tushadi
+        sweep_candidates = [u for u in users if u != bath_u]
         sweep_u = random.choice(sweep_candidates)
+        free_weekly_u = [u for u in users if u not in [bath_u, sweep_u]][0]
 
         data["today_tasks"][bath_u].append({"key": "bath", "name": TASK_CATALOG["bath"]["name"], "done": False})
         data["today_tasks"][sweep_u].append({"key": "sweep", "name": TASK_CATALOG["sweep"]["name"], "done": False})
 
-        data["last_weekly"]["bath"] = bath_u
-        data["last_weekly"]["sweep"] = sweep_u
-
-        free_weekly_u = [u for u in users if u not in [bath_u, sweep_u]][0]
         weekly_text = (
-            f"\n\n🧹 **PAYSHANBA — HAFTALIK KATTA TOZALIK:**\n"
+            f"\n\n🧹 **PAYSHANBA — HAFTALIK KATTA TOZALIK (Dedlayn: 23:00):**\n"
             f"• **{data['users'][bath_u]['name']}:** {TASK_CATALOG['bath']['name']}\n"
             f"• **{data['users'][sweep_u]['name']}:** {TASK_CATALOG['sweep']['name']}\n"
             f"• **{data['users'][free_weekly_u]['name']}:** 😎 Haftalik ishdan ozod!"
@@ -285,7 +311,7 @@ async def assign_daily_and_weekly_tasks(force_test=False):
 
     save_data(data)
 
-    deadline_str = "15:30" if weekday == 4 else "23:00"
+    deadline_str = "23:00"  # Barcha kunlar va haftalik ishlar uchun dedlayn 23:00
     group_lines = [f"🌅 **Xayrli tong! Bugungi vazifalar taqsimlandi (Dedlayn: {deadline_str} gacha):**\n"]
 
     for u in users:
@@ -538,7 +564,7 @@ async def check_deadline():
                 data["group_id"],
                 f"🚨 **DEDLAYN VAQTI TUGADI!**\n\n"
                 f"❌ Bugun vazifasini bajarmaganlar: **{f_names}**.\n"
-                f"⚖️ Qoidaga ko'ra, keyingi ish kunida ularga **2 TA ROL** tushadi, toza ishlagan xonadoshlardan biriga esa **🎉 DAM OLISH (VIP)** beriladi!",
+                f"⚖️ Qoidaga ko'ra, keyingi ish kunida ularga **2 TA ROL** tushadi, toza ishlagan xonadoshlardan biri esa **🎉 DAM OLISH (VIP)** beriladi!",
                 parse_mode="Markdown"
             )
         else:
@@ -552,16 +578,22 @@ async def check_deadline():
 async def main():
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
+    # Har kuni 06:30 da vazifa taqsimlash
     scheduler.add_job(assign_daily_and_weekly_tasks, 'cron', day_of_week='mon-fri', hour=6, minute=30)
-    scheduler.add_job(send_reminder, 'cron', day_of_week='mon-thu', hour=19, minute=0, args=["4 soat"])
-    scheduler.add_job(send_reminder, 'cron', day_of_week='mon-thu', hour=21, minute=30, args=["1.5 soat"])
-    scheduler.add_job(check_deadline, 'cron', day_of_week='mon-thu', hour=23, minute=0)
-
-    scheduler.add_job(send_reminder, 'cron', day_of_week='fri', hour=14, minute=0, args=["1.5 soat (ketish oldidan)"])
-    scheduler.add_job(check_deadline, 'cron', day_of_week='fri', hour=15, minute=30)
+    
+    # Eslatmalar (Kechki 19:00 va 21:30 da)
+    scheduler.add_job(send_reminder, 'cron', day_of_week='mon-fri', hour=19, minute=0, args=["4 soat"])
+    scheduler.add_job(send_reminder, 'cron', day_of_week='mon-fri', hour=21, minute=30, args=["1.5 soat"])
+    
+    # Barcha kunlar uchun dedlayn soat 23:00 da (shu jumladan Payshanba haftalik ishlari uchun ham)
+    scheduler.add_job(check_deadline, 'cron', day_of_week='mon-fri', hour=23, minute=0)
 
     scheduler.start()
     print("✅ Yotoqxona Nazorat Boti ishga tushdi!")
+    
+    # Veb-serverni alohida oqimda ishga tushiramiz
+    threading.Thread(target=run_flask, daemon=True).start()
+    
     await dp.start_polling(bot)
 
 
